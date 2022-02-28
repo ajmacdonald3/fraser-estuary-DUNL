@@ -1,0 +1,576 @@
+---
+title: "Motus Station Report"
+author: "Amie MacDonald and Lucas Berrigan - Motus"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: 
+    fig_width: 12
+    fig_height: 8
+    toc: no
+  html_document: 
+    fig_width: 12
+    fig_height: 8
+    toc: no
+  mainfont: "Helvetica"
+urlcolor: blue
+---
+
+
+<style>
+
+
+.issue, .no-issue {
+  border:solid 1px #000;
+  font-weight:bold;
+  padding:10px;
+  text-align:center;
+  text-decoration:no-decoration;
+}
+.issue {
+  opacity:0.8;
+}
+.issue:hover {
+  cursor:pointer;
+  opacity:1;
+  text-decoration:no-decoration;
+}
+.warning {
+  background-color:#EEE;
+  color:#000;
+}
+.urgent {
+  background-color:#FF0;
+  color:#A00;
+}
+.no-issue {
+  background-color:#EFE;
+}
+
+
+</style>
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE, fig.width=20, fig.height=14) 
+```
+
+```{r, code = readLines("downloadData.R")}
+
+```
+
+```{r load, include=FALSE}
+
+
+# Load Libraries
+library(tidyverse)
+library(rworldmap)
+library(rworldxtra)
+library(motus)
+library(devtools)
+library(lubridate)
+library(scales)
+library(knitr)
+library(mapdata)
+library(fuzzyjoin)
+library(oce)
+library(plotly)
+library(ggmap)
+
+
+# Set session time zone to GMT
+Sys.setenv(tz = "GMT")
+
+#### Folder where data is stored
+#data.dir <- 'C:/Users/Lucas Berrigan/Documents/Data/'
+#### 
+      
+
+Sys.setenv('motus_userAuth' = '')
+
+message(paste0("Preparing ", ifelse(printable, "", "non-"), "printable version."))
+
+message(paste0("Downloading data from ", data.dir))
+
+downloadMotus_recvData(site.name = receiver.deploy.name, projID = projectID, dir = data.dir)
+
+recv.df <- read.csv(paste0(data.dir, 'receiver-deployments.csv')) %>%
+  mutate(tsStart = as.POSIXct(tsStart, origin = '1970-01-01'),
+         tsEnd = as.POSIXct(tsEnd, origin = '1970-01-01'))
+
+select.recv.df <- recv.df %>% 
+  filter(grepl(receiver.deploy.name, deploymentName, T), recvProjectID == projectID | is.na(projectID))
+
+receiver <- unique(select.recv.df$receiverID)
+
+#### 
+#### add 'proj' prefix to filenames?
+      filename.prefix <- ''
+
+#### 
+#### All data before this date will be filtered out - default = as.Date('2000-01-01')
+      earliest.date <- as.Date('2000-01-01')
+#### 
+#### List of tag deploy IDs to omit - default = c(0)
+      tags_to_omit <- c(0, 19156, 28051)
+#### 
+##################################################################
+      
+      
+      
+
+message(paste0(length(which(file.exists(paste(data.dir,receiver,'.motus', sep = '')))), " of ", length(receiver), " files exist!"))
+
+
+      
+      
+
+```
+
+
+```{r loadData, results = 'hide'}
+
+
+sql.table.to.df <- function(recv, tblName, data.dir = '') {
+#  message(paste0(data.dir, recv, ".motus"))
+  sql <- DBI::dbConnect(RSQLite::SQLite(), paste0(data.dir, recv, ".motus"))
+#  message(paste0(DBI::dbListTables(sql), collapse = '\n'))
+  sql %>% tbl(tblName) %>% collect() %>% as_tibble() %>% mutate(serno = recv)
+#  message("Success")
+}
+
+df.deps <- bind_rows(lapply(receiver, function(x){sql.table.to.df(x, 'recvDeps', data.dir)})) %>%
+  mutate(tsStart = as.POSIXct(tsStart, origin = '1970-01-01'),
+         tsEnd = ifelse(is.na(tsEnd), Sys.time(), tsEnd),
+         tsEnd = as.POSIXct(tsEnd, origin = '1970-01-01'))
+
+df.deps$name <- factor(df.deps$name, levels = c(unique(filter(df.deps, grepl(receiver.deploy.name, name))$name), unique(filter(df.deps, !grepl(receiver.deploy.name, name))$name)))
+
+df.batches <- bind_rows(lapply(receiver, function(x){sql.table.to.df(x, 'batches', data.dir)})) %>%
+  mutate(tsStart = as.POSIXct(tsStart, origin = '1970-01-01'),
+         tsEnd = as.POSIXct(tsEnd, origin = '1970-01-01'))
+
+df.activity <- bind_rows(lapply(receiver, function(x){sql.table.to.df(x, 'pulseCounts', data.dir)})) %>%
+  mutate(ts = as.POSIXct(as.Date('1970-01-01')) + hours(hourBin),
+         date = as.Date(ts),
+         ant = factor(ant)) %>%
+  filter(as.Date("2010-01-01") < date) %>%
+  fuzzy_left_join(
+      filter(df.deps, grepl(receiver.deploy.name, name)), 
+      by = c('ts' = 'tsStart', 'ts' = 'tsEnd'), 
+      match_fun = list(`>=`, `<=`) 
+    ) %>%
+  filter(!is.na(deployID),
+         serno.x == serno.y) %>%
+  rename(serno = serno.x) %>%
+  select(-serno.y)
+
+
+#df.activity %>% saveRDS("df.activity.rds")
+
+#df.activity <- readRDS("df.activity.rds")
+
+df.gps <- bind_rows(lapply(receiver, function(x){sql.table.to.df(x, 'gps', data.dir)})) %>%
+  mutate(ts = as.POSIXct(ts, origin = '1970-01-01'),
+         date = as.Date(ts)) %>%
+  filter(as.Date("2010-01-01") < date) %>%
+  fuzzy_left_join(
+      select(filter(df.deps, grepl(receiver.deploy.name, name)), -serno), 
+      by = c('ts' = 'tsStart', 'ts' = 'tsEnd'), 
+      match_fun = list(`>=`, `<=`)
+    ) %>%
+  filter(!is.na(deployID))
+
+# Load the RDS file and clean it up.
+df.raw <- paste0(data.dir, filename.prefix, receiver, ".rds") %>%
+  map_dfr(readRDS) %>%
+  filter(!tagDeployID %in% tags_to_omit,
+         grepl(receiver.deploy.name, recvDeployName)
+         ) %>%
+  mutate(ts = as.POSIXct(ts, origin = '1970-01-01'),
+         lat = ifelse(is.na(gpsLat), recvDeployLat, gpsLat),
+         lon = ifelse(is.na(gpsLon), recvDeployLon, gpsLon)) %>%
+  distinct()
+
+
+
+# Remove unwanted tag deployments and dates
+df <- df.raw[!duplicated(df.raw$hitID),] %>% 
+  filter(runLen > 2, !is.na(tagProjID), ts > earliest.date) %>%
+  mutate(speciesEN = ifelse(is.na(speciesEN), ifelse(is.na(tagDeployTest), "No data", "Test tag"), speciesEN)) %>% 
+  filter(tagProjID %in% c(191, 280, 349)) # get rid of false positives at Blackie Spit
+
+tower.lat <- median(df$lat, na.rm = T)
+tower.lon <- median(df$lon, na.rm = T)
+
+station.ll <- df.deps %>% 
+  mutate(selected = grepl(receiver.deploy.name, name)) %>%
+  filter(selected) %>%
+  rename(lat = latitude, lon = longitude) %>%
+  summarise(lat = median(lat, na.rm = T), lon = median(lat, na.rm = T)) %>%
+  as.list()
+
+station.declination  <- magneticField(tower.lon, tower.lat, median(df$ts))$declination
+
+
+df.ant <- bind_rows(lapply(receiver, function(x){sql.table.to.df(x, 'antDeps', data.dir)})) %>%
+  mutate(bearingTrue = round(bearing - station.declination)) %>%
+  rename(bearingMagnetic = bearing) %>%
+  select(-serno) %>%
+  left_join(df.deps, by = 'deployID') %>%
+  mutate(selected = grepl(receiver.deploy.name, name),
+         depLen = difftime(tsEnd, tsStart, units = 'secs'),
+         name = factor(ifelse(selected, receiver.deploy.name, as.character(name))),
+         name = factor(name, levels = c(receiver.deploy.name, levels(name)[which(levels(name) != receiver.deploy.name)])))
+
+
+
+df.ant.selected <- df.ant %>%
+  filter(selected) %>%
+  mutate(port = factor(port),
+         tsMean = tsStart + (difftime(tsEnd, tsStart, units = 'secs')/2),
+         heightMeters = ifelse(is.na(heightMeters), 0, heightMeters),
+         plot.lon.lg = longitude + (sin(pi * (-bearingTrue + 90) / 180)*-0.0125),
+         plot.lat.lg = latitude + (cos(pi * (-bearingTrue + 90) / 180)*0.0125),
+         plot.lon.sm = longitude + (sin(pi * (-bearingTrue + 90) / 180)*-0.0275),
+         plot.lat.sm = latitude + (cos(pi * (-bearingTrue + 90) / 180)*0.0275)) 
+
+  
+recv.df <- read.csv(paste0(data.dir, 'receiver-deployments.csv')) %>%
+  mutate(tsStart = as.POSIXct(tsStart, origin = '1970-01-01'),
+         tsEnd = as.POSIXct(tsEnd, origin = '1970-01-01'))
+
+cols <- c("#89C5DA", "#DA5724", "#74D944", "#CE50CA", "#C0717C", "#CBD588", "#5F7FC7", 
+          "#673770", "#D3D93E", "#38333E", "#508578", "#D7C1B1", "#689030", "#AD6F3B", "#CD9BCD", 
+          "#D14285", "#6DDE88", "#652926", "#7FDCC0", "#C84248", "#8569D5", "#5E738F", "#D1A33D", 
+          "#8A7C64", "#599861")
+
+
+recv.stats.df <- recv.df %>%
+  filter(receiverID %in% receiver,
+         grepl(receiver.deploy.name, deploymentName)) %>%
+  summarise(min.ts = min(tsStart, na.rm = T), max.ts = max(tsEnd)) %>%
+  mutate(max.ts = as.POSIXct(ifelse(is.na(max.ts), Sys.time(), max.ts), origin = '1970-01-01'),
+         numDays = round(difftime(max.ts, min.ts, units = 'days')),
+         numYears = year(max.ts) - year(min.ts))  
+
+```
+# `r receiver.name`
+
+<div style="border:solid 1px #888;background:#FDD;padding:5px;">
+#### Disclaimer:
+These data have not been inspected for false positives. Broad filters have been applied do reduce the amount of erroneous data, but some may still exist in this report. Any suspicious data can be reported to us here: motus@birdscanada.org
+</div>
+
+```{r output, fig.width = 5, fig.height = 4, echo=FALSE}
+
+
+  # Get lat/lon bounding box around these sites
+  latLonBounds <- list((tower.lon + c(-1, 1)),
+    (tower.lat + c(-1, 1))
+  )
+
+if (F) {
+  # Make a new high resolution map
+  lakes <- map_data('lakes')
+  lakes.df <- fortify(lakes)
+  lakes <- NULL
+  
+  worldMap <- getMap(resolution = "high")
+  
+  # Connect up all the points so the polygons are closed
+  worldMap.df <- fortify(worldMap)
+  worldMap <- NULL
+  
+  
+  
+  # Make a plain map to show station in context with others nearby in the network.
+  recv.df %>%
+    filter(latitude > latLonBounds[[2]][1] & latitude < latLonBounds[[2]][2],
+           longitude > latLonBounds[[1]][1] & longitude < latLonBounds[[1]][2],
+           is.na(tsEnd)) %>% 
+  ggplot(aes(longitude, latitude))+
+    geom_polygon(data = worldMap.df, aes(long, lat,group=group), fill="#AAAAAA", colour="#000000")+
+    geom_polygon(data = lakes.df, aes(long, lat,group=group), fill="#d1dbe5", colour="#000000")+
+    geom_point(aes(fill = 'red'),
+      shape = 21,
+      stroke = 2, 
+      size = 2, 
+      alpha = 1)+
+    geom_point(aes(x = tower.lon, y = tower.lat), shape = 8,
+      color = 'black',
+      stroke = 2,
+      size = 4, 
+      alpha = 1)+
+    geom_point(aes(x = tower.lon, y = tower.lat, fill = 'yellow'), shape = 21,
+      color = 'black',
+      stroke = 2, 
+      size = 3, 
+      alpha = 1)+
+    coord_fixed(xlim = latLonBounds[[1]], ylim = latLonBounds[[2]])+
+    theme(panel.background = element_rect(fill = '#CCDDFF'),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          axis.text = element_blank(),
+          axis.ticks = element_blank(),
+          legend.title = element_blank(),
+          axis.title = element_blank()) +
+    scale_fill_manual(values = c('red' = 'red', 'yellow' = 'yellow'), guide = 'legend', labels = c('Other stations', receiver.name))+ 
+    guides(fill = guide_legend(reverse = TRUE))
+}
+
+#  Load a small map from Google Earth
+map.small <- get_map(location = c(lon = tower.lon, lat = tower.lat), zoom = 9, maptype = "hybrid")
+
+# Get list of nearby receivers
+nearby.recv.df <- recv.df %>%
+  filter(latitude > latLonBounds[[2]][1] & latitude < latLonBounds[[2]][2],
+         longitude > latLonBounds[[1]][1] & longitude < latLonBounds[[1]][2],
+         is.na(tsEnd))
+
+# Plot a satellite map showing antenna directions in context of other stations
+  ggmap(map.small, base_layer = ggplot(data = nearby.recv.df, aes(x = longitude, y = latitude)))+
+      geom_point(fill = 'red',
+                 shape = 21,
+                 stroke = 2, 
+                 size = 2, 
+                 alpha = 1)+
+      geom_point(aes(x = tower.lon, y = tower.lat), 
+                 shape = 8,
+                 color = 'black',
+                 stroke = 2,
+                 size = 4, 
+                 alpha = 1)+
+      geom_point(aes(x = tower.lon, y = tower.lat), 
+                 fill = 'yellow', 
+                 shape = 21,
+                 color = 'black',
+                 stroke = 2, 
+                 size = 3, 
+                 alpha = 1)+
+    geom_text(data = filter(df.ant.selected, status == 'active'), aes(x = plot.lon.lg, y = plot.lat.lg, angle = - bearingTrue + 90, color = port), 
+              label="-->", size = 7)+
+    labs(color = 'Antenna')+
+  #    coord_fixed(xlim = latLonBounds[[1]], ylim = latLonBounds[[2]])+
+      theme(panel.background = element_rect(fill = '#CCDDFF'),
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            axis.text = element_blank(),
+            axis.ticks = element_blank(),
+            axis.title = element_blank()) +
+      scale_fill_manual(values = c('red' = 'red', 'yellow' = 'yellow'), guide = 'legend', labels = c('Other stations', receiver.name))
+
+```
+
+ **First deployed:** `r as.Date(min(select.recv.df$tsStart, na.rm = T))`
+
+
+ **Number of days receiver has been running:** `r recv.stats.df$numDays`
+
+
+ **Number of years receiver has been running:** `r recv.stats.df$numYears`
+ 
+ 
+ **Most recent data:** `r as.Date(max(df.activity$ts, na.rm = T))`
+
+
+ **Number of antennas:** `r length(unique(df.ant[df.ant$selected,]$port[which(df.ant[df.ant$selected,]$deployID == max(df.ant[df.ant$selected,]$deployID))]))`
+
+
+ **Number of different animals detected:** `r length(unique(df$tagDeployID))`
+
+
+ **Number of different species detected:** `r length(unique(df$speciesEN))`
+
+
+ **Total number of detections over all years:** `r length(unique(df$hitID))`
+
+
+
+***
+
+```{r device.history}
+
+basic.colours <- c("red", "green", "blue", "purple", "yellow", "turquoise", "orange")
+
+n.deps <- length(unique(df.ant$name))
+
+cust.cols <- c(hcl(seq(from = 0, to = 360 - (360 / n.deps), length.out = n.deps), 100, 75, alpha = c(1, rep(0.1, n.deps - 1))))
+
+dull.colours <- c("red", 
+                  alpha("green", 0.25), 
+                  alpha("blue", 0.25), 
+                  alpha("purple", 0.25), 
+                  alpha("yellow", 0.25), 
+                  alpha("turquoise", 0.25), 
+                  alpha("orange"))
+
+serno.selected.deps <- df.ant %>%
+  group_by(serno) %>%
+  summarise(selected.start = as.integer(min(tsStart[which(selected)], na.rm = T)))
+
+
+```
+
+
+# Detections
+
+```{r}
+
+df %>%
+  filter(runLen > 2, !is.na(tagDeployID)) %>%
+  mutate(Year = as.character(year(ts))) %>%
+  group_by(Year) %>%
+  summarise(`Species` = length(unique(speciesEN)), `Individuals` = length(unique(tagDeployID)), `Detections` = n()) %>%
+  kable()
+
+```
+
+
+```{r, fig.width = 7, fig.height = 4.5}
+
+df.bySpp <- df %>%
+  filter(runLen > 2, !is.na(speciesEN)) %>%
+  group_by(speciesEN) %>%
+  summarise(Hits = n(), Individuals = length(unique(tagDeployID)), Days = length(unique(date(ts))))
+
+  
+df.bySpp %>%
+  mutate(Species = ifelse(speciesEN %in% arrange(top_n(df.bySpp, 24, Individuals), -Individuals)[1:24,]$speciesEN, speciesEN, 'Other')) %>% 
+  group_by(Species) %>%
+  summarise(Hits = sum(Hits, na.rm = T), Individuals = sum(Individuals, na.rm = T), Days = max(Days, na.rm = T)) %>%
+  ggplot(aes(x = "", y = Individuals, fill = fct_reorder(Species, Individuals))) +
+  geom_bar(width = 1, stat = "identity", position='dodge')+
+  labs(y = "Number of Individual Animals", x = "", fill = 'Species', title = "Number of individual animals per species")+
+  scale_fill_manual(values = cols)+
+  theme_bw()+
+  theme(panel.border = element_blank())+ 
+  guides(fill = guide_legend(reverse = TRUE))
+
+df.bySpp %>% 
+  rename(Species = speciesEN,
+         Detections = Hits) %>%
+  select(-Days) %>%
+  arrange(-Individuals) %>%
+  kable
+
+```
+
+---
+  
+```{r, fig.width = 7, fig.height = 4.5}
+
+df.byProj <- df %>%
+  filter(runLen > 2, !is.na(tagProjID), !is.na(speciesEN)) %>%
+  group_by(tagProjName) %>%
+  summarise(Hits = n(), Individuals = length(unique(tagDeployID)), Days = length(unique(date(ts))), Species = length(unique(speciesEN)))
+
+df.byProj %>%
+  mutate(Project = as.character(ifelse(tagProjName %in% arrange(top_n(df.byProj, 24, Individuals), -Individuals)[1:24,]$tagProjName, tagProjName, 'Other'))) %>%  
+  group_by(Project) %>%
+  summarise(Hits = sum(Hits, na.rm = T), Individuals = sum(Individuals, na.rm = T), Days = max(Days, na.rm = T)) %>%
+  ggplot(aes(x = "", y = Individuals, fill = fct_reorder(Project, Individuals))) +
+  geom_bar(width = 1, stat = "identity", position = 'dodge') +
+ # coord_polar("y", start = 0)+
+  labs(y = "Number of Individual Animals", x = "", title = "Number of individuals animals per project", fill = 'Project ID')+
+  scale_fill_manual(values = cols)+
+  theme_bw()+
+  theme(panel.border = element_blank())+ 
+  guides(fill = guide_legend(reverse = TRUE))
+
+df.byProj  %>% 
+  rename(`Project name` = tagProjName,
+         Detections = Hits) %>%
+  select(-Days) %>%
+  arrange(-Individuals) %>%
+  kable
+```
+
+
+
+
+
+
+```{r, fig.width = 7, fig.height = 4.5}
+
+top5 <- df %>% 
+  filter(runLen > 2, !is.na(tagDeployID)) %>%
+  group_by(speciesEN) %>%
+  summarise(nInd = length(unique(tagDeployID)), nHits = n()) %>%
+  mutate(propHits = nHits/nrow(df)) %>%
+  arrange(desc(nHits))
+
+top <- top5 %>%
+  mutate(Species = factor(ifelse(nHits %in% top5[1:ifelse(nrow(top5) == 5, 5, 4),]$nHits, speciesEN, 'Other'))) %>%
+  select(speciesEN, Species)
+
+levels(top$Species) <- c(levels(top$Species)[!grepl('Other', levels(top$Species))][order(levels(top$Species)[!grepl('Other', levels(top$Species))])], "Other")
+
+
+plot.binwidth <- as.integer(round(difftime(range(df$ts)[2], range(df$ts)[1])/100))
+
+plot.binwidth <- ifelse(plot.binwidth == 0, 1, plot.binwidth)
+
+df %>%
+  filter(runLen > 2, !is.na(tagDeployID)) %>%
+  mutate(date = date(ts)) %>%
+  group_by(tagDeployID, speciesEN, date) %>%
+  summarise(nHits = n()) %>% 
+  left_join(top, by = 'speciesEN') %>%
+  ggplot(aes(date, fill = Species)) +
+  geom_histogram(binwidth = plot.binwidth)+ 
+  scale_fill_manual(values = cols)+
+  labs(x = 'Date', y = 'Number of Individuals', fill = 'Species', title = 'Number of individuals detected each day')+
+  theme_minimal()
+```
+
+
+---
+
+
+```{r, fig.width = 7, fig.height = 4.5}
+
+df %>%
+  filter(runLen > 2, !is.na(tagDeployID)) %>%
+  mutate(Hour = hour(as.POSIXct(ts, origin = '1970-01-01'))-8,
+         Hour = ifelse(Hour < 0, Hour + 24, Hour)) %>%
+  left_join(top, by = 'speciesEN') %>%
+  ggplot(aes(Hour, fill = Species)) +
+  geom_histogram(bins = 24)+ 
+  coord_polar("x", start = 0)+
+  labs(x = 'Hour', y = 'Number of detections', fill = 'Species', title = 'Number of detections by time of day')+
+  theme_minimal()
+ 
+
+```
+
+
+## List of all individuals detected at this station
+Click on Tag ID to learn more about the individual or 'view track' to see its animated flight path.
+
+
+```{r}
+
+
+
+allInd.list <- df %>% 
+  filter(runLen > 2, !is.na(tagDeployID)) %>%
+  group_by(tagDeployID, speciesEN) %>%
+  summarise(`Detections` = n(), 
+            `Days` = length(unique(date(ts))), 
+            `First detected` = min(date(ts)), 
+            `Last detected` = max(date(ts))) %>%
+  ungroup() 
+
+if (!printable) {
+  allInd.list <- allInd.list %>%
+    mutate(`   ` = paste("[View Track]", "(https://motus.org/data/track?tagDeploymentId=", tagDeployID, ")", sep = ''),
+         tagDeployID = paste("[", tagDeployID, "]", "(https://motus.org/data/tagDeployment?id=", tagDeployID, ")", sep = ''))
+}
+
+allInd.list %>%
+  arrange(desc(`Last detected`)) %>%
+  rename(`Tag ID` = tagDeployID, Species = speciesEN) %>%
+  kable()
+
+```
